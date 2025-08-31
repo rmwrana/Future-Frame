@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ভিডিও শেয়ারিং অ্যাপ</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, onSnapshot, addDoc, serverTimestamp, orderBy, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Required global Firebase variables for the Canvas environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app, db, auth, userId;
+        let unsubscribeFromVideos;
+
+        const adminPassword = "admin123"; // Admin password for this demo
+
+        // UI elements
+        const loginBtn = document.getElementById('login-btn');
+        const adminPanel = document.getElementById('admin-panel');
+        const videoList = document.getElementById('video-list');
+        const urlInput = document.getElementById('video-url');
+        const uploadBtn = document.getElementById('upload-btn');
+        const adminMessage = document.getElementById('admin-message');
+        const userIdDisplay = document.getElementById('user-id-display');
+        const mainContent = document.getElementById('main-content');
+        const singleVideoContainer = document.getElementById('single-video-container');
+        const backButton = document.getElementById('back-button');
+
+        // Custom modal UI elements
+        const passwordModal = document.getElementById('password-modal');
+        const passwordInput = document.getElementById('password-input');
+        const passwordSubmitBtn = document.getElementById('password-submit-btn');
+        const passwordCancelBtn = document.getElementById('password-cancel-btn');
+        const messageModal = document.getElementById('message-modal');
+        const messageText = document.getElementById('message-text');
+        const messageOkBtn = document.getElementById('message-ok-btn');
+
+        // Initialize Firebase and handle authentication
+        const initFirebase = async () => {
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                // Use the provided auth token for sign-in, or sign in anonymously if not available
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                // Listen for authentication state changes
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        console.log("Firebase initialized. User ID:", userId);
+                        userIdDisplay.innerText = `ইউজার আইডি: ${userId}`;
+                        checkUrlForVideoId();
+                    } else {
+                        console.log("No user is signed in.");
+                        userId = null;
+                        userIdDisplay.innerText = `ইউজার আইডি: অজানা`;
+                    }
+                });
+
+            } catch (e) {
+                console.error("Firebase Initialization Error:", e);
+                adminMessage.innerText = "Firebase শুরু করতে সমস্যা হয়েছে।";
+            }
+        };
+
+        // Check URL for a specific video ID to display
+        const checkUrlForVideoId = () => {
+            const urlParams = new URLSearchParams(window.location.search);
+            const videoId = urlParams.get('video');
+            if (videoId) {
+                // If a video ID is in the URL, display only that video
+                mainContent.classList.add('hidden');
+                singleVideoContainer.classList.remove('hidden');
+                displaySingleVideo(videoId);
+            } else {
+                // Otherwise, display the full list of videos
+                mainContent.classList.remove('hidden');
+                singleVideoContainer.classList.add('hidden');
+                loadVideos();
+            }
+        };
+        
+        // Display a single video
+        const displaySingleVideo = (videoId) => {
+            singleVideoContainer.innerHTML = `
+                <div class="bg-white p-4 rounded-lg shadow-md mb-4">
+                    <div class="relative pb-[56.25%] mb-4">
+                        <iframe class="absolute top-0 left-0 w-full h-full rounded-md" src="https://www.youtube.com/embed/${videoId}?autoplay=0" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+                    </div>
+                </div>
+                <div class="flex justify-center mt-4">
+                    <button id="back-button" class="bg-gray-500 text-white px-6 py-2 rounded-full shadow-md hover:bg-gray-600 transition-colors">ফিরে যান</button>
+                </div>
+            `;
+            document.getElementById('back-button').addEventListener('click', () => {
+                // Remove the URL parameter and reload
+                window.location.href = window.location.pathname;
+            });
+        };
+
+        // Load videos from the public Firestore collection
+        const loadVideos = () => {
+            // Unsubscribe from the previous listener to avoid duplicates
+            if (unsubscribeFromVideos) {
+                unsubscribeFromVideos();
+            }
+            // Use the public collection path so all users can see the videos
+            const q = query(collection(db, `/artifacts/${appId}/public/data/videos`), orderBy("timestamp", "desc"));
+            
+            // Set up a real-time listener
+            unsubscribeFromVideos = onSnapshot(q, (snapshot) => {
+                videoList.innerHTML = '';
+                if (snapshot.empty) {
+                    videoList.innerHTML = `<p class="text-center text-gray-500 mt-4">এখনো কোনো ভিডিও আপলোড করা হয়নি।</p>`;
+                    return;
+                }
+                snapshot.forEach(doc => {
+                    const video = doc.data();
+                    displayVideoItem(video.url);
+                });
+            }, (error) => {
+                console.error("Error fetching videos: ", error);
+                videoList.innerHTML = `<p class="text-center text-red-500 mt-4">ভিডিও লোড করতে সমস্যা হয়েছে।</p>`;
+            });
+        };
+
+        // Extract YouTube video ID from a URL
+        const getYouTubeId = (url) => {
+            const regex = /(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:watch\?v=|embed\/|v\/|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
+            const match = url.match(regex);
+            return match ? match[1] : null;
+        };
+
+        // Display a video item in the UI
+        const displayVideoItem = (url) => {
+            const videoId = getYouTubeId(url);
+            if (!videoId) {
+                console.error("Invalid YouTube URL:", url);
+                return;
+            }
+
+            const videoItem = document.createElement('div');
+            videoItem.className = 'bg-white p-4 rounded-lg shadow-md mb-4';
+            videoItem.innerHTML = `
+                <div class="relative pb-[56.25%] mb-4">
+                    <iframe class="absolute top-0 left-0 w-full h-full rounded-md" src="https://www.youtube.com/embed/${videoId}?autoplay=0" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+                </div>
+                <div class="flex flex-col sm:flex-row justify-between items-center space-y-2 sm:space-y-0 sm:space-x-2">
+                    <button class="share-btn bg-blue-500 text-white px-4 py-2 rounded-full hover:bg-blue-600 transition-colors w-full sm:w-auto">শেয়ার করুন</button>
+                    <p class="text-sm text-gray-500 truncate w-full sm:w-auto text-center sm:text-right">ভিডিও লিংক: ${url}</p>
+                </div>
+            `;
+            videoItem.querySelector('.share-btn').addEventListener('click', () => shareVideo(videoId));
+            videoList.appendChild(videoItem);
+        };
+
+        // Upload a video to the public Firestore collection
+        const uploadVideo = async () => {
+            const url = urlInput.value.trim();
+            if (!url) {
+                adminMessage.innerText = "দয়া করে একটি ভিডিও লিংক দিন।";
+                return;
+            }
+            if (!getYouTubeId(url)) {
+                adminMessage.innerText = "এটি একটি বৈধ YouTube ভিডিও লিংক নয়।";
+                return;
+            }
+
+            try {
+                // Video is uploaded to a public database so it can be seen by all
+                await addDoc(collection(db, `/artifacts/${appId}/public/data/videos`), {
+                    url: url,
+                    timestamp: serverTimestamp()
+                });
+                adminMessage.innerText = "ভিডিও সফলভাবে আপলোড হয়েছে!";
+                urlInput.value = '';
+            } catch (e) {
+                console.error("Error adding document: ", e);
+                adminMessage.innerText = "ভিডিও আপলোড করতে সমস্যা হয়েছে।";
+            }
+        };
+
+        // Share video link by creating a special URL
+        const shareVideo = (videoId) => {
+            const shareUrl = `${window.location.origin}${window.location.pathname}?video=${videoId}`;
+            const el = document.createElement('textarea');
+            el.value = shareUrl;
+            el.setAttribute('readonly', '');
+            el.style.position = 'absolute';
+            el.style.left = '-9999px';
+            document.body.appendChild(el);
+            el.select();
+            document.execCommand('copy');
+            document.body.removeChild(el);
+            showMessageBox("ভিডিওর জন্য বিশেষ লিংক কপি করা হয়েছে!");
+        };
+        
+        // Show custom message box
+        const showMessageBox = (message) => {
+            messageText.innerText = message;
+            messageModal.classList.remove('hidden');
+        };
+
+        // Show custom password modal
+        const showPasswordModal = () => {
+            passwordModal.classList.remove('hidden');
+            passwordInput.focus();
+        };
+
+        // Hide custom password modal
+        const hidePasswordModal = () => {
+            passwordModal.classList.add('hidden');
+            passwordInput.value = '';
+        };
+
+        // Show admin panel
+        const showAdminPanel = () => {
+            loginBtn.classList.add('hidden');
+            adminPanel.classList.remove('hidden');
+            adminMessage.innerText = "অ্যাডমিন প্যানেলে স্বাগতম!";
+        };
+
+        // Set up event listeners on page load
+        window.addEventListener('load', () => {
+            loginBtn.addEventListener('click', showPasswordModal);
+            uploadBtn.addEventListener('click', uploadVideo);
+            
+            passwordSubmitBtn.addEventListener('click', () => {
+                const password = passwordInput.value;
+                if (password === adminPassword) {
+                    hidePasswordModal();
+                    showAdminPanel();
+                } else {
+                    showMessageBox("পাসওয়ার্ড ভুল!");
+                }
+            });
+
+            passwordCancelBtn.addEventListener('click', hidePasswordModal);
+            messageOkBtn.addEventListener('click', () => messageModal.classList.add('hidden'));
+
+            initFirebase();
+        });
+    </script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f3f4f6;
+        }
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 100;
+        }
+    </style>
+</head>
+<body class="p-4 sm:p-8 min-h-screen">
+    <div class="max-w-3xl mx-auto">
+        <header class="text-center mb-6">
+            <h1 class="text-3xl sm:text-4xl font-bold text-gray-800 mb-2">ভিডিও শেয়ারিং অ্যাপ</h1>
+            <p class="text-gray-600 mb-4" id="user-id-display"></p>
+        </header>
+
+        <main id="main-content">
+            <div class="flex justify-center mb-6">
+                <button id="login-btn" class="bg-indigo-600 text-white px-6 py-2 rounded-full shadow-md hover:bg-indigo-700 transition-colors">অ্যাডমিন হিসেবে লগইন করুন</button>
+            </div>
+            
+            <div id="admin-panel" class="hidden bg-gray-100 p-6 rounded-lg shadow-inner mb-6">
+                <h2 class="text-2xl font-semibold mb-4 text-gray-700">ভিডিও আপলোড</h2>
+                <div class="mb-4">
+                    <label for="video-url" class="block text-gray-700 font-medium mb-2">ভিডিও লিংক দিন (YouTube)</label>
+                    <input type="url" id="video-url" placeholder="উদাহরণ: https://www.youtube.com/watch?v=xxxxxxxxxxx" class="w-full px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                </div>
+                <button id="upload-btn" class="w-full bg-green-500 text-white px-4 py-2 rounded-full hover:bg-green-600 transition-colors">ভিডিও আপলোড করুন</button>
+                <p id="admin-message" class="text-sm mt-2 text-center text-gray-600"></p>
+            </div>
+
+            <section id="video-list">
+                <p class="text-center text-gray-500 mt-4">ভিডিও লোড হচ্ছে...</p>
+            </section>
+        </main>
+        
+        <div id="single-video-container" class="hidden"></div>
+    </div>
+
+    <!-- কাস্টম পাসওয়ার্ড মোডাল -->
+    <div id="password-modal" class="modal-overlay hidden">
+        <div class="bg-white p-6 rounded-lg shadow-xl w-80">
+            <h2 class="text-xl font-semibold mb-4 text-gray-800">অ্যাডমিন লগইন</h2>
+            <input type="password" id="password-input" placeholder="পাসওয়ার্ড দিন" class="w-full px-4 py-2 border border-gray-300 rounded-md mb-4 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <div class="flex justify-end space-x-2">
+                <button id="password-cancel-btn" class="bg-gray-300 text-gray-800 px-4 py-2 rounded-full hover:bg-gray-400 transition-colors">বাতিল</button>
+                <button id="password-submit-btn" class="bg-indigo-600 text-white px-4 py-2 rounded-full hover:bg-indigo-700 transition-colors">লগইন</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- কাস্টম মেসেজ মোডাল -->
+    <div id="message-modal" class="modal-overlay hidden">
+        <div class="bg-white p-6 rounded-lg shadow-xl w-80 text-center">
+            <p id="message-text" class="text-gray-700 mb-4"></p>
+            <button id="message-ok-btn" class="bg-indigo-600 text-white px-6 py-2 rounded-full hover:bg-indigo-700 transition-colors">ওকে</button>
+        </div>
+    </div>
+</body>
+</html>
